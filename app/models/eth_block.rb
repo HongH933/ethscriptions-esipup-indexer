@@ -204,6 +204,9 @@ class EthBlock < ApplicationRecord
       end
       
       EthTransaction.prune_transactions(block_number)
+
+       # === ESIP-UP: 仅在 Sepolia 且达到阈值区块时，发现并注册 UP-Token 的 deploy ===
+      Token.discover_up_tokens_in_block!(block_record)
       
       Token.process_block(block_record)
       

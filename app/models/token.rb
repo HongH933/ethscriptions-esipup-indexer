@@ -28,10 +28,102 @@ class Token < ApplicationRecord
 
   scope :minted_out, -> { where("total_supply = max_supply") }
   scope :not_minted_out, -> { where("total_supply < max_supply") }
+
+    # === ESIP-UP: normalize & validations ===
+  before_validation :normalize_toadd
+
+  validates :premint, numericality: { greater_than_or_equal_to: 0 }, if: :up_mode?
+  validate  :validate_up_mode_fields
+
+  private
+
+  def normalize_toadd
+    self.toadd = toadd&.downcase
+  end
+
+  # 仅当 up_mode 开启时才检查/Only checked if up_mode is on
+  def validate_up_mode_fields
+    return unless up_mode?
+
+    if toadd.blank?
+      errors.add(:toadd, "must be present when up_mode is true")
+    elsif !toadd.match?(/\A0x[0-9a-f]{40}\z/) # 统一小写十六进制地址/lowercase hexadecimal addresses
+      errors.add(:toadd, "must be a valid lowercase hex address (0x...)")
+    end
+
+    if premint.to_i > max_supply.to_i
+      errors.add(:premint, "cannot exceed max_supply")
+    end
+
+    # 可选：整除性校验，避免尾数（如果不需要，可整段注释掉）
+    if mint_amount.to_i > 0
+      if (premint.to_i % mint_amount.to_i) != 0
+        errors.add(:premint, "must be divisible by mint_amount")
+      end
+      if ((max_supply.to_i - premint.to_i) % mint_amount.to_i) != 0
+        errors.add(:base, "public cap must be divisible by mint_amount")
+      end
+    end
+  end
+
   
   def minted_out?
     total_supply == max_supply
   end
+
+    # === ESIP-UP: helpers ===
+  def up_mode?
+    # 如果 DB 有 boolean 列 up_mode，直接用；若没有，up_mode 默认为 false/If the DB has a boolean column up_mode, use it directly; if not, up_mode defaults to false
+    super
+  rescue NoMethodError
+    false
+  end
+
+  def premint_cap
+    premint.to_i
+  end
+
+  def public_cap
+    max_supply.to_i - premint.to_i
+  end
+
+  def premint_remaining
+    premint_cap - premint_minted.to_i
+  end
+
+  def public_remaining
+    public_cap - public_minted.to_i
+  end
+
+  # tx_from 需要在“mint 处理点”处传进来（小写）
+  def use_premint?(tx_from)
+    up_mode? &&
+      tx_from.to_s.downcase == toadd.to_s &&
+      premint_minted.to_i < premint_cap
+  end
+
+  def can_mint_premint?(amt)
+    premint_remaining >= amt.to_i
+  end
+
+  def can_mint_public?(amt)
+    public_remaining >= amt.to_i
+  end
+
+  # 实际累加水位（注意：这里只更新自身字段，不写 balances；balances 仍按官方口径在处理器里更新）
+  #Actual accumulated level (Note: only the fields themselves are updated here, not balances; balances are still updated in the processor according to official specifications)
+  def apply_premint!(amt)
+    a = amt.to_i
+    self.premint_minted = premint_minted.to_i + a
+    self.total_supply   = total_supply.to_i   + a
+  end
+
+  def apply_public!(amt)
+    a = amt.to_i
+    self.public_minted  = public_minted.to_i + a
+    self.total_supply   = total_supply.to_i   + a
+  end
+
   
   def self.create_from_token_details!(tick:, p:, max:, lim:)
     deploy_tx = find_deploy_transaction(tick: tick, p: p, max: max, lim: lim)
@@ -278,6 +370,16 @@ class Token < ApplicationRecord
     ])).tap do |json|
       if options[:include_balances]
         json[:balances] = balances
+      end
+
+      # === ESIP-UP: expose extra fields when enabled ===
+      if up_mode?
+        json[:up_mode]        = true
+        json[:premint]        = premint
+        json[:toadd]          = toadd
+        json[:premint_minted] = premint_minted
+        json[:public_minted]  = public_minted
+        # total_supply Already in existing field
       end
     end
   end

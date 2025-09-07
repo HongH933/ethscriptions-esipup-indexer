@@ -157,46 +157,45 @@ class Token < ApplicationRecord
   
   def self.process_block(block)
     all_tokens = Token.all.to_a
-    
     return unless all_tokens.present?
-    
+
     transfers = EthscriptionTransfer.where(block_number: block.block_number).includes(:ethscription)
 
     transfers_by_token = transfers.group_by do |transfer|
       all_tokens.detect { |token| token.ethscription_is_token_item?(transfer.ethscription) }
     end
-    
+
     new_token_items = []
-    
+
     # Process each token's transfers as a batch
     transfers_by_token.each do |token, transfers|
       next unless token.present?
 
-      # Start with the current state
+      # === 1) 以 tokens 表里的状态为起点；把已有 balances 的“地址键”统一成小写 ===
       total_supply = token.total_supply.to_i
-      balances = Hash.new(0).merge(token.balances.deep_dup)
+      existing     = (token.balances || {}).dup
+      balances     = Hash.new(0)
+      existing.each { |addr, amt| balances[addr.to_s.downcase] += amt.to_i }
 
-      # Apply all transfers to the state
-      # 按交易索引排序，确保同区块内顺序一致
+      # === 2) 应用本块 transfers（同区块内按 tx index 排序，确保顺序一致） ===
       transfers = transfers.sort_by(&:transaction_index)
 
       transfers.each do |transfer|
+        to_addr   = transfer.to_address.to_s.downcase
+        from_addr = transfer.from_address.to_s.downcase
+
         if transfer.is_only_transfer?
-          # === 铸造（首次转移）分支 ===
+          # —— 铸造（首次转移）
           mint_accepted = true
 
           if token.up_mode?
-            tx_from_lc = transfer.from_address.to_s.downcase
-
-            if token.use_premint?(tx_from_lc)
-              # 预挖路径
+            if token.use_premint?(from_addr)
               unless token.can_mint_premint?(token.mint_amount)
                 mint_accepted = false
               else
                 token.apply_premint!(token.mint_amount)
               end
             else
-              # 公募路径（含 toadd 超额 或 普通地址）
               unless token.can_mint_public?(token.mint_amount)
                 mint_accepted = false
               else
@@ -209,9 +208,8 @@ class Token < ApplicationRecord
           end
 
           if mint_accepted
-            # 入账：给接收地址加余额、增加本区块 total_supply，并记录 TokenItem
-            balances[transfer.to_address] += token.mint_amount
-            total_supply += token.mint_amount
+            balances[to_addr] += token.mint_amount
+            total_supply      += token.mint_amount
 
             new_token_items << TokenItem.new(
               deploy_ethscription_transaction_hash: token.deploy_ethscription_transaction_hash,
@@ -222,36 +220,38 @@ class Token < ApplicationRecord
             )
           end
         else
-          # === 普通转移（非铸造） ===
-          balances[transfer.to_address]   += token.mint_amount
-          balances[transfer.from_address] -= token.mint_amount
+          # —— 普通转移（非铸造）
+          balances[to_addr]   += token.mint_amount
+          balances[from_addr] -= token.mint_amount
         end
       end
 
-
-      balances.delete_if { |address, amount| amount == 0 }
-      
+      balances.delete_if { |_, amount| amount == 0 }
       if balances.values.any?(&:negative?)
         raise "Negative balance detected in block: #{block.block_number}"
       end
-      
-      # Create a single state change for the block
+
+      # === 3) 记“本块快照” ===
       token.token_states.create!(
-        total_supply: total_supply,
-        balances: balances,
-        block_number: block.block_number,
-        block_timestamp: block.timestamp,
-        block_blockhash: block.blockhash,
+        total_supply:   total_supply,
+        balances:       balances,
+        block_number:   block.block_number,
+        block_timestamp:block.timestamp,
+        block_blockhash:block.blockhash,
       )
+
+      # === 4) 把“本块最终状态”回写到 tokens 表，确保下一块从最新状态起步 ===
       token.update_columns(
-        total_supply: token.total_supply,
-        premint_minted: token.premint_minted,
-        public_minted: token.public_minted
+        total_supply:   total_supply,             # 用本方法里累计后的值
+        balances:       balances,                 # 最新余额
+        premint_minted: token.premint_minted,     # 两条水位
+        public_minted:  token.public_minted
       )
     end
-    
+
     TokenItem.import!(new_token_items) if new_token_items.present?
   end
+
   
   def token_id_from_ethscription(ethscription)
     regex = /\Adata:,\{"p":"#{Regexp.escape(protocol)}","op":"mint","tick":"#{Regexp.escape(tick)}","id":"([1-9][0-9]{0,#{trailing_digit_count}})","amt":"#{mint_amount.to_i}"\}\z/
@@ -423,13 +423,14 @@ class Token < ApplicationRecord
     end
   end
     # === ESIP-UP: 在某区块中发现并注册带 premint+toadd 的 erc-20 部署 ===
+# === ESIP-UP: 在某区块中发现并注册带 premint+toadd 的 erc-20 部署（安全创建版） ===
   def self.discover_up_tokens_in_block!(block_record)
     # 仅在 Sepolia 且达到阈值区块时启用（见 config/initializers/esip_up.rb）
     return unless defined?(EsipUp) && EsipUp.active_for_block?(block_record.block_number)
 
     # 扫描本区块内新产生的 ethscriptions
     Ethscription.where(block_number: block_record.block_number).find_each do |e|
-      # 只处理可解析的 JSON（dataURI 的“内容部分”，官方模型里 e.content 是解码后的文本）
+      # 只处理可解析的 JSON（e.content 是解码后的文本）
       payload = begin
         JSON.parse(e.content)
       rescue JSON::ParserError
@@ -451,29 +452,41 @@ class Token < ApplicationRecord
       lim  = payload['lim']
       next if tick.nil? || max.nil? || lim.nil?
 
-      # 4) 已存在同一 deploy 就跳过
+      # 4) 已存在同一 deploy 或同名 tick 就跳过
       next if Token.exists?(deploy_ethscription_transaction_hash: e.transaction_hash)
       if Token.exists?(protocol: 'erc-20', tick: tick)
         # 同名 tick 已注册：保持官方行为，不再注册，留作普通 Ethscription
         next
       end
 
-      # 5) 注册 Token（开启 up_mode；其余字段保持官方语义）
-      Token.create!(
+      # 5) 安全创建：前置数值检查 + valid? 校验，不抛错（无效 deploy 当普通 Ethscription）
+      max_i = max.to_i
+      lim_i = lim.to_i
+      pre_i = premint.to_i
+      next unless lim_i > 0 && max_i >= 0 && pre_i >= 0 && pre_i <= max_i
+
+      t = Token.new(
         deploy_ethscription_transaction_hash: e.transaction_hash,
         deploy_block_number: e.block_number,
         deploy_transaction_index: e.transaction_index,
         protocol: 'erc-20',
-        tick: tick,                     # tick 的大小写完全沿用官方，不做归一
-        max_supply: max.to_i,
-        mint_amount: lim.to_i,
+        tick: tick,                # tick 大小写保持官方
+        max_supply: max_i,
+        mint_amount: lim_i,
         total_supply: 0,
         up_mode: true,
-        premint: premint.to_i,
-        toadd: toadd.downcase,          # 实际小写化在 before_validation 里也会再次保证
+        premint: pre_i,
+        toadd: toadd.downcase,     # before_validation 里也会再小写一次
         premint_minted: 0,
         public_minted: 0
       )
+
+      if t.valid?
+        t.save!
+      else
+        Rails.logger.warn("[ESIP-UP] skip invalid deploy tx=#{e.transaction_hash}: #{t.errors.full_messages.join(', ')}")
+        next  # 不抛错，忽略 ⇒ 在 token 分支里当普通 Ethscription
+      end
     end
   end
 end

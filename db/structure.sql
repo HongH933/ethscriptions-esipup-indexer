@@ -1,3 +1,8 @@
+\restrict 3ELRSBPLPKjj5OGhFB1njla32fVHDFBfx9swsFnjteDYFmjtq5fENH5SgISmWep
+
+-- Dumped from database version 14.19 (Homebrew)
+-- Dumped by pg_dump version 14.19 (Homebrew)
+
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
@@ -636,6 +641,11 @@ CREATE TABLE public.tokens (
     created_at timestamp(6) without time zone NOT NULL,
     updated_at timestamp(6) without time zone NOT NULL,
     balances jsonb DEFAULT '{}'::jsonb NOT NULL,
+    up_mode boolean DEFAULT false NOT NULL,
+    premint bigint DEFAULT 0 NOT NULL,
+    toadd text,
+    premint_minted bigint DEFAULT 0 NOT NULL,
+    public_minted bigint DEFAULT 0 NOT NULL,
     CONSTRAINT chk_rails_31c1808af4 CHECK (((tick)::text ~ '^[[:alnum:]p{Emoji_Presentation}]+$'::text)),
     CONSTRAINT chk_rails_3458514b65 CHECK (((deploy_ethscription_transaction_hash)::text ~ '^0x[a-f0-9]{64}$'::text)),
     CONSTRAINT chk_rails_3d55d7040f CHECK (((max_supply % mint_amount) = 0)),
@@ -643,7 +653,10 @@ CREATE TABLE public.tokens (
     CONSTRAINT chk_rails_596664ed3b CHECK ((total_supply >= 0)),
     CONSTRAINT chk_rails_b41faadd12 CHECK ((mint_amount > 0)),
     CONSTRAINT chk_rails_e954152758 CHECK ((max_supply > 0)),
-    CONSTRAINT chk_rails_f38f6eac6d CHECK (((protocol)::text ~ '^[a-z0-9-]+$'::text))
+    CONSTRAINT chk_rails_f38f6eac6d CHECK (((protocol)::text ~ '^[a-z0-9-]+$'::text)),
+    CONSTRAINT tokens_premint_minted_nonneg CHECK ((premint_minted >= 0)),
+    CONSTRAINT tokens_premint_nonneg CHECK ((premint >= 0)),
+    CONSTRAINT tokens_public_minted_nonneg CHECK ((public_minted >= 0))
 );
 
 
@@ -1591,9 +1604,12 @@ ALTER TABLE ONLY public.token_items
 -- PostgreSQL database dump complete
 --
 
+\unrestrict 3ELRSBPLPKjj5OGhFB1njla32fVHDFBfx9swsFnjteDYFmjtq5fENH5SgISmWep
+
 SET search_path TO "$user", public;
 
 INSERT INTO "schema_migrations" (version) VALUES
+('20250907101512'),
 ('20240411154249'),
 ('20240327135159'),
 ('20240317200158'),

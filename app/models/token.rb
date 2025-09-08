@@ -66,6 +66,7 @@ class Token < ApplicationRecord
     end
   end
 
+  public
   
   def minted_out?
     total_supply == max_supply

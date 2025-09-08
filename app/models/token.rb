@@ -423,8 +423,7 @@ class Token < ApplicationRecord
       end
     end
   end
-    # === ESIP-UP: 在某区块中发现并注册带 premint+toadd 的 erc-20 部署 ===
-# === ESIP-UP: 在某区块中发现并注册带 premint+toadd 的 erc-20 部署（安全创建版） ===
+# === ESIP-UP: 在某区块中发现并注册带 premint+toadd 的 erc-20 部署（安全创建 + 历史检查版） ===
   def self.discover_up_tokens_in_block!(block_record)
     # 仅在 Sepolia 且达到阈值区块时启用（见 config/initializers/esip_up.rb）
     return unless defined?(EsipUp) && EsipUp.active_for_block?(block_record.block_number)
@@ -453,14 +452,23 @@ class Token < ApplicationRecord
       lim  = payload['lim']
       next if tick.nil? || max.nil? || lim.nil?
 
-      # 4) 已存在同一 deploy 或同名 tick 就跳过
+      # 4) 同一 deploy 或 tokens 表里已有此 tick -> 跳过
       next if Token.exists?(deploy_ethscription_transaction_hash: e.transaction_hash)
       if Token.exists?(protocol: 'erc-20', tick: tick)
-        # 同名 tick 已注册：保持官方行为，不再注册，留作普通 Ethscription
         next
       end
 
-      # 5) 安全创建：前置数值检查 + valid? 校验，不抛错（无效 deploy 当普通 Ethscription）
+      # 5) 历史上若已出现过同名 tick 的任意 erc-20 deploy（无论是否 UP），也跳过
+      quoted_tick = ActiveRecord::Base.connection.quote_string(tick)
+      deploy_regex = %Q(^data:,{"p":"erc-20","op":"deploy","tick":"#{quoted_tick}",)
+      exists_prior_deploy = Ethscription
+        .where(" (block_number < :b) OR (block_number = :b AND transaction_index < :txi) ",
+              b: e.block_number, txi: e.transaction_index)
+        .where("content_uri ~ ?", deploy_regex)
+        .exists?
+      next if exists_prior_deploy
+
+      # 6) 安全创建：前置数值检查 + valid? 校验，不抛错（无效 deploy 当普通 Ethscription）
       max_i = max.to_i
       lim_i = lim.to_i
       pre_i = premint.to_i
@@ -486,7 +494,7 @@ class Token < ApplicationRecord
         t.save!
       else
         Rails.logger.warn("[ESIP-UP] skip invalid deploy tx=#{e.transaction_hash}: #{t.errors.full_messages.join(', ')}")
-        next  # 不抛错，忽略 ⇒ 在 token 分支里当普通 Ethscription
+        next
       end
     end
   end

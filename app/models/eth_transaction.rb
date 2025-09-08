@@ -69,14 +69,75 @@ class EthTransaction < ApplicationRecord
     }
   end
 
+  private
+
+  # 解析 tx.input -> 返回 JSON Hash 或 nil
+  def esip_up_parse_payload
+    hex = input.to_s.sub(/\A0x/, '')
+    return nil if hex.blank?
+
+    bytes = [hex].pack('H*') rescue nil
+    return nil unless bytes
+
+    str = bytes.force_encoding('UTF-8')
+
+    # data:... 的 content 在逗号后
+    if str.start_with?('data:')
+      comma = str.index(',')
+      body  = comma ? str[(comma + 1)..-1] : str
+    else
+      body = str
+    end
+
+    # 常见 mint/deploy 都是纯 JSON 文本；如果你项目里还有 gzip/base64，
+    # 这里可以按需要扩展（先保持简单，解析失败就返回 nil）
+    JSON.parse(body)
+  rescue JSON::ParserError
+    nil
+  end
+
+  # 命中“public 满 + premint 未满 + 非 toadd”的违规 mint 则返回 true
+  def esip_up_should_drop_mint?(payload)
+    return false unless defined?(EsipUp)
+    return false unless EsipUp.active_for_block?(block_number)
+
+    return false unless payload.is_a?(Hash)
+    return false unless payload['p'] == 'erc-20' && payload['op'] == 'mint'
+
+    tick = payload['tick']
+    amt  = payload['amt'].to_i
+    return false if tick.blank? || amt <= 0
+
+    token = Token.find_by(protocol: 'erc-20', tick: tick)
+    return false unless token&.up_mode?
+    return false unless amt == token.mint_amount.to_i
+
+    # 仅当 public 已满 且 premint 还没满，且本笔不是 toadd，才拦截
+    public_full  = token.public_minted.to_i >= token.public_cap
+    premint_open = token.premint_minted.to_i < token.premint_cap
+    from_lc      = from_address.to_s.downcase
+
+    public_full && premint_open && (from_lc != token.toadd.to_s)
+  end
+
+
   def process!
     self.transfer_index = 0
+
+    # === ESIP-UP 硬拦截（基于 tx.input）：public 已满 + premint 未满 + 非 toadd 的 mint 直接丢弃 ===
+    if (payload = esip_up_parse_payload)
+      if esip_up_should_drop_mint?(payload)
+        Rails.logger.info("[ESIP-UP] drop public mint while premint open tx=#{transaction_hash} tick=#{payload['tick']}")
+        return  # 不创建 Ethscription / 不生成 Transfer
+      end
+    end
     
     create_ethscription_from_input!
     create_ethscription_from_events!
     create_ethscription_transfers_from_input!
     create_ethscription_transfers_from_events!
   end
+
   
   def blob_from_version_hash(version_hash)
     block_blob_sidecars.find do |blob|
@@ -142,6 +203,22 @@ class EthTransaction < ApplicationRecord
       rescue Eth::Abi::DecodingError
         next
       end
+
+       # === ESIP-UP 硬拦截（基于 event.content_uri）==============================
+      if content_uri&.start_with?('data:')
+        comma = content_uri.index(',')
+        body  = comma ? content_uri[(comma + 1)..-1] : content_uri
+        begin
+          payload = JSON.parse(body)
+        rescue JSON::ParserError
+          payload = nil
+        end
+        if payload && esip_up_should_drop_mint?(payload)
+          Rails.logger.info("[ESIP-UP] drop event-based public mint while premint open tx=#{transaction_hash} tick=#{payload['tick']}")
+          next  # 不创建 Ethscription
+        end
+      end
+      # ========================================================================
           
       potentially_valid = Ethscription.new(
         {
@@ -345,4 +422,5 @@ class EthTransaction < ApplicationRecord
   def self.on_testnet?
     ENV['ETHEREUM_NETWORK'] != "eth-mainnet"
   end
+  public :process!, :create_ethscription_attachment_if_needed!
 end

@@ -1,4 +1,4 @@
-\restrict 3ELRSBPLPKjj5OGhFB1njla32fVHDFBfx9swsFnjteDYFmjtq5fENH5SgISmWep
+\restrict csj7c2g8hL3BCxf8nAibr91VY7RFfdnJzaCYxIJraATbVWPAmCYOBvPE3qbMzw8
 
 -- Dumped from database version 14.19 (Homebrew)
 -- Dumped by pg_dump version 14.19 (Homebrew)
@@ -1604,7 +1604,7 @@ ALTER TABLE ONLY public.token_items
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 3ELRSBPLPKjj5OGhFB1njla32fVHDFBfx9swsFnjteDYFmjtq5fENH5SgISmWep
+\unrestrict csj7c2g8hL3BCxf8nAibr91VY7RFfdnJzaCYxIJraATbVWPAmCYOBvPE3qbMzw8
 
 SET search_path TO "$user", public;
 

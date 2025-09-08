@@ -422,5 +422,5 @@ class EthTransaction < ApplicationRecord
   def self.on_testnet?
     ENV['ETHEREUM_NETWORK'] != "eth-mainnet"
   end
-  public :process!, :create_ethscription_attachment_if_needed!
+  public :process!, :create_ethscription_attachment_if_needed!, :transfer_attrs
 end
